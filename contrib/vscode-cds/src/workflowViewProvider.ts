@@ -7,10 +7,25 @@ import { CdsRepository, CdsWorkflowRun } from "./cds/models";
 /** Number of runs fetched per page. */
 const RUN_PAGE_SIZE = 15;
 
+export interface RunFilter {
+  branch?: string;
+  commit?: string;
+  author?: string;
+}
+
 interface RunPage {
   runs: RunItem[];
   offset: number;
   hasMore: boolean;
+  filter?: RunFilter;
+}
+
+function describeFilter(filter: RunFilter): string {
+  const parts: string[] = [];
+  if (filter.branch) { parts.push(`branch:${filter.branch}`); }
+  if (filter.commit) { parts.push(`commit:${filter.commit.substring(0, 7)}`); }
+  if (filter.author) { parts.push(`author:${filter.author}`); }
+  return parts.join("  ");
 }
 
 // ─── Tree item classes ───────────────────────────────────────────────────────
@@ -158,6 +173,7 @@ export class RunItem extends vscode.TreeItem {
       `Status: ${run.status}`,
       refName ? `Ref: ${refName}` : "",
       run.commit ? `Commit: ${run.commit}` : "",
+      run.author ? `Author: ${run.author}` : "",
       run.username ? `By: ${run.username}` : "",
       run.started ? `Started: ${run.started}` : "",
     ]
@@ -185,12 +201,35 @@ export class LoadMoreItem extends vscode.TreeItem {
   }
 }
 
+/** Summary of the active filter, shown above the filtered runs. */
+export class FilterSummaryItem extends vscode.TreeItem {
+  readonly kind = "filterSummary" as const;
+  constructor(
+    public readonly workflow: WorkflowItem,
+    public readonly filter: RunFilter,
+  ) {
+    super("Filtered runs", vscode.TreeItemCollapsibleState.None);
+    this.id = `filter:${workflow.id}`;
+    this.description = describeFilter(filter);
+    this.tooltip = "Click to edit or clear the run filter";
+    this.iconPath = new vscode.ThemeIcon("filter");
+    this.command = {
+      command: "vscode-cds.filterRuns",
+      title: "Edit run filter",
+      arguments: [workflow],
+    };
+  }
+}
+
 /** Placeholder shown when a workflow has no run to display. */
 export class NoRunsItem extends vscode.TreeItem {
   readonly kind = "noRuns" as const;
-  constructor() {
-    super("No runs found", vscode.TreeItemCollapsibleState.None);
-    this.iconPath = new vscode.ThemeIcon("info");
+  constructor(filtered: boolean) {
+    super(
+      filtered ? "No runs match the filter" : "No runs found",
+      vscode.TreeItemCollapsibleState.None,
+    );
+    this.iconPath = new vscode.ThemeIcon(filtered ? "filter" : "info");
   }
 }
 
@@ -201,6 +240,7 @@ type TreeNode =
   | WorkflowItem
   | RunItem
   | LoadMoreItem
+  | FilterSummaryItem
   | NoRunsItem
   | SeparatorItem;
 
@@ -238,10 +278,12 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
   // Promise-based caches — undefined = not started yet
   private repoPromise: Promise<TreeNode[]> | undefined;
   private workflowPromises = new Map<string, Promise<WorkflowItem[]>>();
+  private workflowItems = new Map<string, WorkflowItem[]>();
 
-  // Run pages, keyed by workflow tree id
+  // Run pages and filters, keyed by workflow tree id
   private runPages = new Map<string, RunPage>();
   private runPagePromises = new Map<string, Promise<RunPage>>();
+  private runFilters = new Map<string, RunFilter>();
 
   // Workflow names discovered per CDS repo (projectKey:repoId -> Set<workflowName>)
   private discoveredWorkflows = new Map<string, Promise<string[]>>();
@@ -258,6 +300,8 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
   setProjectKey(projectKey: string | undefined): void {
     if (this.projectKey !== projectKey) {
       this.projectKey = projectKey;
+      this.runFilters.clear();
+      this.updateFilterContext();
       this.refresh();
     }
   }
@@ -300,6 +344,7 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
   refresh(): void {
     this.repoPromise = undefined;
     this.workflowPromises.clear();
+    this.workflowItems.clear();
     this.runPages.clear();
     this.runPagePromises.clear();
     this.discoveredWorkflows.clear();
@@ -310,6 +355,40 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
   refreshRuns(wf: WorkflowItem): void {
     this.clearRunPages(wf.id!);
     this._onDidChangeTreeData.fire(wf);
+  }
+
+  /** Workflows already loaded in the tree, across every repository. */
+  getWorkflows(): WorkflowItem[] {
+    return [...this.workflowItems.values()].flat();
+  }
+
+  /** Current filter applied to a workflow's runs. */
+  getFilter(wf: WorkflowItem): RunFilter | undefined {
+    return this.runFilters.get(wf.id!);
+  }
+
+  /** Apply (or clear, when empty) the filter of a workflow and reload its runs. */
+  setFilter(wf: WorkflowItem, filter: RunFilter | undefined): void {
+    if (filter && (filter.branch || filter.commit || filter.author)) {
+      this.runFilters.set(wf.id!, filter);
+    } else {
+      this.runFilters.delete(wf.id!);
+    }
+    this.clearRunPages(wf.id!);
+    this.updateFilterContext();
+    this._onDidChangeTreeData.fire(wf);
+  }
+
+  /** Remove every active filter. */
+  clearAllFilters(): void {
+    if (this.runFilters.size === 0) {
+      return;
+    }
+    this.runFilters.clear();
+    this.runPages.clear();
+    this.runPagePromises.clear();
+    this.updateFilterContext();
+    this._onDidChangeTreeData.fire();
   }
 
   /** Append the next page of older runs to a workflow. */
@@ -428,6 +507,7 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
       }
     }
 
+    this.workflowItems.set(repo.id!, workflows);
     return workflows;
   }
 
@@ -446,6 +526,10 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
       return;
     }
     const page = await this.getRunPage(wf, 0);
+    if (this.runFilters.get(key) !== page.filter) {
+      // The filter changed while the first page was loading.
+      return this.ensureRunPage(wf);
+    }
     this.runPages.set(key, page);
   }
 
@@ -462,8 +546,9 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
   }
 
   private async fetchRunPage(wf: WorkflowItem, offset: number): Promise<RunPage> {
+    const filter = this.runFilters.get(wf.id!);
     if (!wf.repo.cdsRepo) {
-      return { runs: [], offset, hasMore: false };
+      return { runs: [], offset, hasMore: false, filter };
     }
     const { projectKey, vcsName, repoName } = wf.repo.cdsRepo;
 
@@ -476,6 +561,9 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
       {
         offset,
         limit: RUN_PAGE_SIZE + 1,
+        branch: filter?.branch,
+        commit: filter?.commit,
+        author: filter?.author,
       },
     );
     const pageRuns = runs.slice(0, RUN_PAGE_SIZE);
@@ -484,6 +572,7 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
       runs: pageRuns.map((r) => new RunItem(r, wf)),
       offset: offset + pageRuns.length,
       hasMore: runs.length > RUN_PAGE_SIZE,
+      filter,
     };
   }
 
@@ -493,9 +582,13 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
     if (!page) {
       return [];
     }
+    const filter = this.runFilters.get(key);
     const nodes: TreeNode[] = [];
+    if (filter) {
+      nodes.push(new FilterSummaryItem(wf, filter));
+    }
     if (page.runs.length === 0) {
-      nodes.push(new NoRunsItem());
+      nodes.push(new NoRunsItem(!!filter));
       return nodes;
     }
     nodes.push(...page.runs);
@@ -503,6 +596,14 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
       nodes.push(new LoadMoreItem(wf));
     }
     return nodes;
+  }
+
+  private updateFilterContext(): void {
+    void vscode.commands.executeCommand(
+      "setContext",
+      "cdsRunsFiltered",
+      this.runFilters.size > 0,
+    );
   }
 
   private async findCdsDirs(dir: string, depth = 0): Promise<string[]> {

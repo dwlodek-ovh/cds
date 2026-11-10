@@ -8,6 +8,7 @@ export interface CdsWorkflowRun {
   username?: string;
   ref?: string;
   commit?: string;
+  author?: string;
 }
 
 export interface CDSWorkflow {

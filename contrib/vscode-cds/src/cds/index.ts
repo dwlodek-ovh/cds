@@ -216,11 +216,16 @@ export class CDS {
                 ?? "",
             ref: git?.["ref_name"] ?? r["ref_name"] ?? "",
             commit: git?.["sha"] ?? r["commit"] ?? "",
+            author: git?.["author"] ?? "",
         };
     }
 
     /**
-     * Search runs of a single v2 workflow with pagination.
+     * Search runs of a single v2 workflow with pagination and optional filters.
+     *
+     * Branch, commit and author are matched server-side through the free-text
+     * `--query` parameter, which supports partial values (short SHAs, branch
+     * names, author names).
      */
     static async searchWorkflowRuns(
         projectKey: string,
@@ -230,6 +235,9 @@ export class CDS {
         opts?: {
             offset?: number;
             limit?: number;
+            branch?: string;
+            commit?: string;
+            author?: string;
         },
     ): Promise<CdsWorkflowRun[]> {
         const args = [
@@ -240,6 +248,12 @@ export class CDS {
             "--limit", String(opts?.limit ?? 15),
             "--format", "json",
         ];
+        const query = [opts?.branch, opts?.commit, opts?.author]
+            .filter((v): v is string => !!v && v.trim().length > 0)
+            .join(" ");
+        if (query) {
+            args.push("--query", query);
+        }
 
         const out = await CDS.getInstance().runCtl(...args);
         let items: Record<string, any>[];
@@ -345,7 +359,8 @@ export class CDS {
 
     private async runCtl(...args: string[]): Promise<string> {
         const pwd = this.getCurrentPath();
-        const cmd = `cdsctl -f ${CDS.getConfigFile()} -n ${args.join(" ")}`;
+        const quotedArgs = args.map(CDS.quoteArg).join(" ");
+        const cmd = `cdsctl -f ${CDS.getConfigFile()} -n ${quotedArgs}`;
 
         Journal.logInfo(`running command ${cmd} from directory ${pwd}`);
 
@@ -370,6 +385,11 @@ export class CDS {
                     resolve(stdout);
                 });
         });
+    }
+
+    /** Quote an argument so it survives the shell used by `exec`. */
+    private static quoteArg(arg: string): string {
+        return `'${arg.replace(/'/g, "'\\''")}'`;
     }
 
     private getCurrentPath(): string {

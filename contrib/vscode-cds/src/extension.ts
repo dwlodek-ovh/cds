@@ -19,7 +19,7 @@ import { onGitRepositoryChanged, updateGitRepository } from './events/git-reposi
 import { PreviewWorkflowCommand } from './commands/preview-workflow';
 import { isCDSActionFile, isCDSWorkerModelFile, isCDSWorkflowFile } from './cds/file_utils';
 import { ClearCacheCommand } from './commands/clear-cache';
-import { WorkflowViewProvider, WorkflowItem, RunItem, RepoItem } from './workflowViewProvider';
+import { WorkflowViewProvider, WorkflowItem, RunItem, RepoItem, RunFilter } from './workflowViewProvider';
 import { onProjectChanged } from './events/project';
 
 const CDS_SCHEMA = 'cds';
@@ -230,6 +230,104 @@ export async function activate(context: vscode.ExtensionContext) {
         }
     }));
 
+    context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.filterRuns', async (item?: WorkflowItem) => {
+        let workflow = item instanceof WorkflowItem ? item : undefined;
+        if (!workflow) {
+            const workflows = workflowViewProvider.getWorkflows();
+            if (workflows.length === 0) {
+                vscode.window.showInformationMessage('Expand a repository in the CDS view to load its workflows first.');
+                return;
+            }
+            const picked = await vscode.window.showQuickPick(
+                workflows.map((wf) => ({
+                    label: wf.cdsWorkflowName,
+                    description: wf.repo.displayName,
+                    workflow: wf,
+                })),
+                {
+                    title: 'Filter workflow runs',
+                    placeHolder: 'Select a workflow to filter its runs',
+                },
+            );
+            if (!picked) { return; }
+            workflow = picked.workflow;
+        }
+        const filter = await promptRunFilter(workflowViewProvider.getFilter(workflow));
+        workflowViewProvider.setFilter(workflow, filter);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.clearRunFilters', () => {
+        workflowViewProvider.clearAllFilters();
+    }));
+}
+
+interface RunFilterField extends vscode.QuickPickItem {
+    field: 'branch' | 'commit' | 'author' | 'clear';
+    prompt?: string;
+}
+
+async function promptRunFilter(current?: RunFilter): Promise<RunFilter | undefined> {
+    const filter: RunFilter = { ...current };
+    const fields: RunFilterField[] = [
+        {
+            label: '$(git-branch) Branch',
+            description: filter.branch,
+            field: 'branch',
+            prompt: 'Branch name that triggered the run',
+        },
+        {
+            label: '$(git-commit) Commit SHA',
+            description: filter.commit,
+            field: 'commit',
+            prompt: 'Commit SHA that triggered the run (full or short)',
+        },
+        {
+            label: '$(person) Author',
+            description: filter.author,
+            field: 'author',
+            prompt: 'Commit author',
+        },
+        {
+            label: '$(clear-all) Clear filters',
+            field: 'clear',
+        },
+    ];
+
+    while (true) {
+        const picked = await vscode.window.showQuickPick(fields, {
+            title: 'Filter workflow runs',
+            placeHolder: 'Select a field to edit (Esc to apply)',
+            ignoreFocusOut: true,
+        });
+        if (!picked) {
+            break;
+        }
+        if (picked.field === 'clear') {
+            filter.branch = undefined;
+            filter.commit = undefined;
+            filter.author = undefined;
+            break;
+        }
+        const value = await vscode.window.showInputBox({
+            title: 'Filter workflow runs',
+            prompt: picked.prompt,
+            value: filter[picked.field] ?? '',
+            placeHolder: 'Leave empty to remove this filter',
+            ignoreFocusOut: true,
+        });
+        if (value === undefined) {
+            continue;
+        }
+        const trimmed = value.trim();
+        if (trimmed) {
+            filter[picked.field] = trimmed;
+        } else {
+            delete filter[picked.field];
+        }
+        fields.find((f) => f.field === picked.field)!.description = trimmed || undefined;
+    }
+
+    return filter;
 }
 
 async function currentGitBranch(cwd?: string): Promise<string> {

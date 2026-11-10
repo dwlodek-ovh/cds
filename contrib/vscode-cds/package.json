@@ -102,6 +102,18 @@
         "title": "Load More Runs",
         "category": "CDS",
         "icon": "$(ellipsis)"
+      },
+      {
+        "command": "vscode-cds.filterRuns",
+        "title": "Filter Runs",
+        "category": "CDS",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "vscode-cds.clearRunFilters",
+        "title": "Clear Run Filters",
+        "category": "CDS",
+        "icon": "$(clear-all)"
       }
     ],
     "configuration": {
@@ -139,6 +151,16 @@
           "command": "vscode-cds.refreshWorkflowView",
           "when": "view == vscode-cds-workflows",
           "group": "navigation"
+        },
+        {
+          "command": "vscode-cds.filterRuns",
+          "when": "view == vscode-cds-workflows",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vscode-cds.clearRunFilters",
+          "when": "view == vscode-cds-workflows && cdsRunsFiltered",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -166,6 +188,21 @@
           "command": "vscode-cds.refreshRuns",
           "when": "view == vscode-cds-workflows && viewItem == cdsWorkflow",
           "group": "inline@4"
+        },
+        {
+          "command": "vscode-cds.filterRuns",
+          "when": "view == vscode-cds-workflows && viewItem =~ /^cdsWorkflow/",
+          "group": "inline@5"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vscode-cds.loadMoreRuns",
+          "when": "false"
+        },
+        {
+          "command": "vscode-cds.filterRuns",
+          "when": "false"
         }
       ]
     },
