@@ -19,7 +19,8 @@ import { onGitRepositoryChanged, updateGitRepository } from './events/git-reposi
 import { PreviewWorkflowCommand } from './commands/preview-workflow';
 import { isCDSActionFile, isCDSWorkerModelFile, isCDSWorkflowFile } from './cds/file_utils';
 import { ClearCacheCommand } from './commands/clear-cache';
-import { WorkflowViewProvider, WorkflowItem, RunItem, RepoItem, RunFilter } from './workflowViewProvider';
+import { WorkflowViewProvider, WorkflowItem, RunItem, JobItem, StepItem, RepoItem, RunFilter } from './workflowViewProvider';
+import { CDSRunLogs } from './run-logs';
 import { onProjectChanged } from './events/project';
 
 const CDS_SCHEMA = 'cds';
@@ -105,11 +106,15 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // ── Workflow Explorer ────────────────────────────────────────────────────
     const workflowViewProvider = new WorkflowViewProvider();
+    const runLogs = new CDSRunLogs();
 
     context.subscriptions.push(workflowViewProvider);
-    context.subscriptions.push(
-        vscode.window.registerTreeDataProvider('vscode-cds-workflows', workflowViewProvider)
-    );
+    context.subscriptions.push(runLogs);
+    const workflowTreeView = vscode.window.createTreeView('vscode-cds-workflows', {
+        treeDataProvider: workflowViewProvider,
+        showCollapseAll: true,
+    });
+    context.subscriptions.push(workflowTreeView);
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeWorkspaceFolders(() => workflowViewProvider.refresh())
@@ -258,6 +263,53 @@ export async function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.clearRunFilters', () => {
         workflowViewProvider.clearAllFilters();
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.expandRun', async (item?: RunItem) => {
+        if (item) {
+            await workflowTreeView.reveal(item, { expand: true, select: true });
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.expandJob', async (item?: JobItem) => {
+        if (item) {
+            await workflowTreeView.reveal(item, { expand: true, select: true });
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.showStepLogs', async (item?: StepItem) => {
+        const repo = item?.job.run.workflow.repo.cdsRepo;
+        if (!item || !repo) {
+            vscode.window.showErrorMessage('No CDS step selected.');
+            return;
+        }
+        const title = `${item.job.job.jobId} / ${item.step.name}`;
+        try {
+            const log = await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Loading logs for ${title}...`,
+                },
+                () => CDS.getWorkflowRunJobLog(
+                    repo.projectKey,
+                    item.job.run.run.id,
+                    item.job.job.id,
+                    item.step.logName,
+                ),
+            );
+            runLogs.show(title, log);
+        } catch (e) {
+            const err = e as { message?: string; stdout?: string; stderr?: string };
+            const message = [err.message, err.stdout, err.stderr]
+                .filter(Boolean)
+                .join("\n")
+                .trim();
+            if (message.includes("no log available") || message.includes("no log link")) {
+                runLogs.show(title, "");
+            } else {
+                vscode.window.showErrorMessage(`Failed to load step logs: ${message}`);
+            }
+        }
     }));
 }
 

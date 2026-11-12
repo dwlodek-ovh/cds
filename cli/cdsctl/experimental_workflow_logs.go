@@ -22,7 +22,78 @@ var experimentalWorkflowRunJobsCmd = cli.Command{
 func experimentalWorkflowRunLogs() *cobra.Command {
 	return cli.NewCommand(experimentalWorkflowRunJobsCmd, nil, []*cobra.Command{
 		cli.NewCommand(workflowRunJobLogsDownloadCmd, workflowRunJobLogsDownloadFunc, nil, withAllCommandModifiers()...),
+		cli.NewCommand(workflowRunJobLogShowCmd, workflowRunJobLogShowFunc, nil, withAllCommandModifiers()...),
 	})
+}
+
+var workflowRunJobLogShowCmd = cli.Command{
+	Name:    "show",
+	Aliases: []string{"get"},
+	Short:   "Display the log of a workflow run job step",
+	Example: "cdsctl experimental workflow logs show <proj_key> <workflow_run_id> <job_run_id> <step_name>",
+	Ctx:     []cli.Arg{},
+	Args: []cli.Arg{
+		{Name: "proj_key"},
+		{Name: "workflow_run_id"},
+		{Name: "job_run_id"},
+		{Name: "step_name"},
+	},
+}
+
+func workflowRunJobLogShowFunc(v cli.Values) error {
+	projKey := v.GetString("proj_key")
+	workflowRunID := v.GetString("workflow_run_id")
+	jobRunID := v.GetString("job_run_id")
+	stepName := v.GetString("step_name")
+
+	runJob, err := client.WorkflowV2RunJob(context.Background(), projKey, workflowRunID, jobRunID)
+	if err != nil {
+		return err
+	}
+
+	links, err := client.WorkflowV2RunJobLogLinks(context.Background(), projKey, workflowRunID, jobRunID)
+	if err != nil {
+		return err
+	}
+
+	steps := make([]string, 0)
+	for i, s := range runJob.Job.Steps {
+		name := sdk.GetJobStepName(s.ID, i)
+		if _, ok := runJob.StepsStatus[name]; ok {
+			steps = append(steps, name)
+		}
+	}
+	for i := len(runJob.Job.Steps) - 1; i >= 0; i-- {
+		name := sdk.GetJobStepName(runJob.Job.Steps[i].ID, i)
+		postName := "Post-" + name
+		if _, ok := runJob.StepsStatus[postName]; ok {
+			steps = append(steps, postName)
+		}
+	}
+
+	idx := -1
+	for i, s := range steps {
+		if s == stepName {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return cli.NewError("no log available for step %q", stepName)
+	}
+	if idx >= len(links.Data) {
+		return cli.NewError("no log link available for step %q", stepName)
+	}
+
+	data, err := client.WorkflowLogDownload(context.Background(), sdk.CDNLogLink{
+		APIRef:   links.Data[idx].APIRef,
+		ItemType: links.Data[idx].ItemType,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Print(string(data))
+	return nil
 }
 
 var workflowRunJobLogsDownloadCmd = cli.Command{

@@ -216,7 +216,7 @@ export class CDS {
                 ?? "",
             ref: git?.["ref_name"] ?? r["ref_name"] ?? "",
             commit: git?.["sha"] ?? r["commit"] ?? "",
-            author: git?.["author"] ?? "",
+            author: git?.["author"] ?? r["author"] ?? "",
         };
     }
 
@@ -267,6 +267,39 @@ export class CDS {
     }
 
     /**
+     * Fetch a full workflow run, including its workflow definition and jobs.
+     */
+    static async getWorkflowRun(
+        projectKey: string,
+        runId: string,
+    ): Promise<{ run: Record<string, any>; jobs: Record<string, any>[] } | undefined> {
+        const out = await CDS.getInstance().runCtl(
+            "experimental", "workflow", "get",
+            projectKey, runId,
+        );
+        try {
+            return JSON.parse(out);
+        } catch {
+            Journal.logError(new Error(`getWorkflowRun: failed to parse JSON output`));
+            return undefined;
+        }
+    }
+
+    /** Fetch the log of a single step of a workflow run job. */
+    static async getWorkflowRunJobLog(
+        projectKey: string,
+        runId: string,
+        jobRunId: string,
+        stepName: string,
+    ): Promise<string> {
+        return CDS.getInstance().runCtlWithTimeout(
+            120_000,
+            "experimental", "workflow", "logs", "show",
+            projectKey, runId, jobRunId, stepName,
+        );
+    }
+
+    /**
      * Search v2 workflow runs in a project with optional filters.
      */
     static async searchWorkflows(
@@ -282,12 +315,14 @@ export class CDS {
             args.push("--repository", opts.repository);
         }
         const out = await CDS.getInstance().runCtl(...args);
+        let items: Record<string, any>[];
         try {
-            return JSON.parse(out);
+            items = JSON.parse(out);
         } catch {
             Journal.logError(new Error(`searchWorkflows: failed to parse JSON output`));
             return [];
         }
+        return items.map((r) => CDS.mapWorkflowRun(r, projectKey, opts?.workflow ?? ""));
     }
 
     /**
@@ -358,6 +393,10 @@ export class CDS {
     private constructor() { }
 
     private async runCtl(...args: string[]): Promise<string> {
+        return this.runCtlWithTimeout(30_000, ...args);
+    }
+
+    private async runCtlWithTimeout(timeout: number, ...args: string[]): Promise<string> {
         const pwd = this.getCurrentPath();
         const quotedArgs = args.map(CDS.quoteArg).join(" ");
         const cmd = `cdsctl -f ${CDS.getConfigFile()} -n ${quotedArgs}`;
@@ -368,7 +407,8 @@ export class CDS {
             exec(cmd,
                 {
                     cwd: pwd,
-                    timeout: 30_000,
+                    timeout,
+                    maxBuffer: 50 * 1024 * 1024,
                 },
                 (error, stdout, stderr) => {
                     Journal.logInfo(stdout)
@@ -377,7 +417,10 @@ export class CDS {
 
                     if (error) {
                         Journal.logError(error);
-                        return reject(error);
+                        const enriched = error as typeof error & { stdout?: string; stderr?: string };
+                        enriched.stdout = stdout;
+                        enriched.stderr = stderr;
+                        return reject(enriched);
                     }
                     if (stderr) {
                         return reject(stderr);

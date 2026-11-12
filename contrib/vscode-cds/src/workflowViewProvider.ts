@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as fsp from "fs/promises";
 import * as path from "path";
 import { CDS } from "./cds";
-import { CdsRepository, CdsWorkflowRun } from "./cds/models";
+import { CdsRepository, CdsWorkflowRun, CdsWorkflowRunJob, CdsWorkflowRunStep } from "./cds/models";
 
 /** Number of runs fetched per page. */
 const RUN_PAGE_SIZE = 15;
@@ -148,6 +148,94 @@ function relativeTime(iso: string): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+function isZeroTime(value: unknown): boolean {
+  return !value || String(value).startsWith("0001-01-01T00:00:00");
+}
+
+function stepStatus(status: Record<string, any> | undefined): string | undefined {
+  if (!status) {
+    return undefined;
+  }
+  const conclusion = status["conclusion"] || status["outcome"];
+  if (conclusion) {
+    return conclusion;
+  }
+  // A step with a start time and no end time is currently running.
+  if (!isZeroTime(status["started"]) && isZeroTime(status["ended"])) {
+    return "Building";
+  }
+  return undefined;
+}
+
+function mapRunJob(raw: Record<string, any>): CdsWorkflowRunJob {
+  const jobDef = raw["job"] ?? {};
+  const rawSteps: Record<string, any>[] = Array.isArray(jobDef["steps"]) ? jobDef["steps"] : [];
+  const stepsStatus: Record<string, any> = raw["steps_status"] ?? {};
+  const steps: CdsWorkflowRunStep[] = [];
+
+  rawSteps.forEach((step, index) => {
+    const id = step?.["id"] || `step-${index}`;
+    steps.push({
+      name: step?.["id"] || `Step ${index + 1}`,
+      logName: id,
+      status: stepStatus(stepsStatus[id]),
+    });
+  });
+
+  for (let i = rawSteps.length - 1; i >= 0; i--) {
+    const id = rawSteps[i]?.["id"] || `step-${i}`;
+    const logName = `Post-${id}`;
+    if (stepsStatus[logName]) {
+      steps.push({
+        name: `Post ${rawSteps[i]?.["id"] || `Step ${i + 1}`}`,
+        logName,
+        status: stepStatus(stepsStatus[logName]),
+      });
+    }
+  }
+
+  const matrix = raw["matrix"] && Object.keys(raw["matrix"]).length > 0
+    ? raw["matrix"]
+    : undefined;
+
+  return {
+    id: raw["id"] ?? "",
+    jobId: raw["job_id"] ?? "",
+    status: raw["status"] ?? "",
+    retry: Number(raw["retry"] ?? 0),
+    matrix,
+    steps,
+  };
+}
+
+function matrixKey(job: CdsWorkflowRunJob): string {
+  if (!job.matrix) {
+    return "";
+  }
+  return Object.keys(job.matrix)
+    .sort()
+    .map((key) => `${key}=${job.matrix![key]}`)
+    .join(",");
+}
+
+function jobLabel(job: CdsWorkflowRunJob): string {
+  const key = matrixKey(job);
+  return key ? `${job.jobId} (${key})` : job.jobId;
+}
+
+/** Keep the latest retry of each job (and of each matrix variant). */
+function dedupeRunJobs(jobs: CdsWorkflowRunJob[]): CdsWorkflowRunJob[] {
+  const latest = new Map<string, CdsWorkflowRunJob>();
+  for (const job of jobs) {
+    const key = `${job.jobId}:${matrixKey(job)}`;
+    const previous = latest.get(key);
+    if (!previous || (job.retry ?? 0) >= (previous.retry ?? 0)) {
+      latest.set(key, job);
+    }
+  }
+  return [...latest.values()];
+}
+
 export class RunItem extends vscode.TreeItem {
   readonly kind = "run" as const;
   constructor(
@@ -159,7 +247,7 @@ export class RunItem extends vscode.TreeItem {
     const ago = run.started ? relativeTime(run.started) : "";
 
     // Label: #number  ago
-    super(`#${run.runNumber}  ${ago}`, vscode.TreeItemCollapsibleState.None);
+    super(`#${run.runNumber}  ${ago}`, vscode.TreeItemCollapsibleState.Collapsed);
     this.id = `run:${run.id}`;
 
     // Description: branch:ref  commit:sha
@@ -181,6 +269,69 @@ export class RunItem extends vscode.TreeItem {
       .join("\n");
     this.iconPath = statusIcon(run.status);
     this.contextValue = runContextValue(run.status);
+    this.command = {
+      command: "vscode-cds.expandRun",
+      title: "Expand run",
+      arguments: [this],
+    };
+  }
+}
+
+/** A job of a workflow run. Expanding it lists the job steps. */
+export class JobItem extends vscode.TreeItem {
+  readonly kind = "job" as const;
+  constructor(
+    public readonly job: CdsWorkflowRunJob,
+    public readonly run: RunItem,
+  ) {
+    super(
+      jobLabel(job),
+      job.steps.length > 0
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.None,
+    );
+    this.id = `job:${run.id}:${job.id}`;
+    this.description = job.status;
+    this.tooltip = `Job ${jobLabel(job)}\nStatus: ${job.status}`;
+    this.iconPath = statusIcon(job.status);
+    this.contextValue = "cdsJob";
+    if (job.steps.length > 0) {
+      this.command = {
+        command: "vscode-cds.expandJob",
+        title: "Expand job",
+        arguments: [this],
+      };
+    }
+  }
+}
+
+/** A step of a workflow run job. Clicking it opens its log. */
+export class StepItem extends vscode.TreeItem {
+  readonly kind = "step" as const;
+  constructor(
+    public readonly step: CdsWorkflowRunStep,
+    public readonly job: JobItem,
+  ) {
+    super(step.name, vscode.TreeItemCollapsibleState.None);
+    this.id = `step:${job.id}:${step.logName}`;
+    this.description = step.status ?? "";
+    this.tooltip = `Step ${step.name}${step.status ? `\nStatus: ${step.status}` : ""}\nClick to show logs`;
+    this.iconPath = statusIcon(step.status ?? "");
+    this.contextValue = "cdsStep";
+    this.command = {
+      command: "vscode-cds.showStepLogs",
+      title: "Show step logs",
+      arguments: [this],
+    };
+  }
+}
+
+/** Placeholder shown when a run has no job. */
+export class NoJobsItem extends vscode.TreeItem {
+  readonly kind = "noJobs" as const;
+  constructor() {
+    super("No jobs found", vscode.TreeItemCollapsibleState.None);
+    this.iconPath = new vscode.ThemeIcon("info");
   }
 }
 
@@ -239,6 +390,9 @@ type TreeNode =
   | RepoItem
   | WorkflowItem
   | RunItem
+  | JobItem
+  | StepItem
+  | NoJobsItem
   | LoadMoreItem
   | FilterSummaryItem
   | NoRunsItem
@@ -284,6 +438,9 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
   private runPages = new Map<string, RunPage>();
   private runPagePromises = new Map<string, Promise<RunPage>>();
   private runFilters = new Map<string, RunFilter>();
+
+  // Jobs of a run, keyed by run tree id
+  private runJobPromises = new Map<string, Promise<TreeNode[]>>();
 
   // Workflow names discovered per CDS repo (projectKey:repoId -> Set<workflowName>)
   private discoveredWorkflows = new Map<string, Promise<string[]>>();
@@ -338,6 +495,12 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
       }
       return this.renderRunNodes(element);
     }
+    if (element instanceof RunItem) {
+      return this.getRunJobs(element);
+    }
+    if (element instanceof JobItem) {
+      return element.job.steps.map((step) => new StepItem(step, element));
+    }
     return [];
   }
 
@@ -347,6 +510,7 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
     this.workflowItems.clear();
     this.runPages.clear();
     this.runPagePromises.clear();
+    this.runJobPromises.clear();
     this.discoveredWorkflows.clear();
     this._onDidChangeTreeData.fire();
   }
@@ -354,6 +518,7 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
   /** Refresh only a single workflow's run list (after stop / restart). */
   refreshRuns(wf: WorkflowItem): void {
     this.clearRunPages(wf.id!);
+    this.runJobPromises.clear();
     this._onDidChangeTreeData.fire(wf);
   }
 
@@ -518,6 +683,35 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
         this.runPagePromises.delete(key);
       }
     }
+  }
+
+  private getRunJobs(runItem: RunItem): Promise<TreeNode[]> {
+    const key = runItem.id!;
+    let promise = this.runJobPromises.get(key);
+    if (!promise) {
+      promise = this.buildRunJobs(runItem).catch((err) => {
+        this.runJobPromises.delete(key);
+        throw err;
+      });
+      this.runJobPromises.set(key, promise);
+    }
+    return promise;
+  }
+
+  private async buildRunJobs(runItem: RunItem): Promise<TreeNode[]> {
+    const repo = runItem.workflow.repo.cdsRepo;
+    if (!repo) {
+      return [];
+    }
+    const payload = await CDS.getWorkflowRun(repo.projectKey, runItem.run.id);
+    if (!payload) {
+      return [new NoJobsItem()];
+    }
+    const jobs = dedupeRunJobs((payload.jobs ?? []).map((raw) => mapRunJob(raw)));
+    if (jobs.length === 0) {
+      return [new NoJobsItem()];
+    }
+    return jobs.map((job) => new JobItem(job, runItem));
   }
 
   private async ensureRunPage(wf: WorkflowItem): Promise<void> {

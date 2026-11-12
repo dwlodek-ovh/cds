@@ -27,6 +27,7 @@ func experimentalWorkflow() *cobra.Command {
 		cli.NewDeleteCommand(workflowV2RunDeleteCmd, workflowV2RunDeleteFunc, nil, withAllCommandModifiers()...),
 		cli.NewCommand(workflowRestartCmd, workflowRestartFunc, nil, withAllCommandModifiers()...),
 		cli.NewListCommand(workflowRunHistoryCmd, workflowRunHistoryFunc, nil, withAllCommandModifiers()...),
+		cli.NewCommand(workflowRunGetCmd, workflowRunGetFunc, nil, withAllCommandModifiers()...),
 		cli.NewListCommand(workflowRunInfosListCmd, workflowRunInfosListFunc, nil, withAllCommandModifiers()...),
 		cli.NewGetCommand(workflowRunStatusCmd, workflowRunStatusFunc, nil, withAllCommandModifiers()...),
 		cli.NewCommand(workflowRunStopCmd, workflowRunStopFunc, nil, withAllCommandModifiers()...),
@@ -133,6 +134,44 @@ var workflowRunSearchCmd = cli.Command{
 	},
 }
 
+type CliRun struct {
+	ID           string                  `json:"id" cli:"id"`
+	ProjectKey   string                  `json:"project_key" cli:"project_key"`
+	VCSServer    string                  `json:"vcs_server" cli:"vcs_server"`
+	Repository   string                  `json:"repository" cli:"repository"`
+	WorkflowName string                  `json:"workflow_name" cli:"workflow_name"`
+	User         string                  `json:"user" cli:"user"`
+	Status       sdk.V2WorkflowRunStatus `json:"status" cli:"status"`
+	RunNumber    int64                   `json:"run_number" cli:"run_number"`
+	Started      time.Time               `json:"started" cli:"started"`
+	LastModified time.Time               `json:"last_modified" cli:"last_modified"`
+	RefName      string                  `json:"ref_name" cli:"ref_name"`
+	Commit       string                  `json:"commit" cli:"commit"`
+	Author       string                  `json:"author" cli:"author"`
+}
+
+func cliRunsFromV2(runs []sdk.V2WorkflowRun) []CliRun {
+	cliRuns := make([]CliRun, len(runs))
+	for i, r := range runs {
+		cliRuns[i] = CliRun{
+			ID:           r.ID,
+			ProjectKey:   r.ProjectKey,
+			VCSServer:    r.VCSServer,
+			Repository:   r.Repository,
+			WorkflowName: r.WorkflowName,
+			User:         r.Initiator.Username(),
+			Status:       r.Status,
+			RunNumber:    r.RunNumber,
+			Started:      r.Started,
+			LastModified: r.LastModified,
+			RefName:      r.Contexts.Git.RefName,
+			Commit:       r.Contexts.Git.Sha,
+			Author:       r.Contexts.Git.Author,
+		}
+	}
+	return cliRuns
+}
+
 func workflowRunSearchFunc(v cli.Values) (cli.ListResult, error) {
 	commit := v.GetString("commit")
 	workflow := v.GetString("workflow")
@@ -198,7 +237,7 @@ func workflowRunSearchFunc(v cli.Values) (cli.ListResult, error) {
 		return nil, err
 	}
 
-	return cli.AsListResult(runs), nil
+	return cli.AsListResult(cliRunsFromV2(runs)), nil
 }
 
 var workflowRunHistoryCmd = cli.Command{
@@ -282,38 +321,42 @@ func workflowRunHistoryFunc(v cli.Values) (cli.ListResult, error) {
 		return nil, err
 	}
 
-	type CliRun struct {
-		ID           string                  `json:"id" cli:"id"`
-		ProjectKey   string                  `json:"project_key" cli:"project_key"`
-		VCSServer    string                  `json:"vcs_server" cli:"vcs_server"`
-		Repository   string                  `json:"repository" cli:"repository"`
-		WorkflowName string                  `json:"workflow_name" cli:"workflow_name"`
-		User         string                  `json:"user" cli:"user"`
-		Status       sdk.V2WorkflowRunStatus `json:"status" cli:"status"`
-		RunNumber    int64                   `json:"run_number" cli:"run_number" `
-		Started      time.Time               `json:"started" cli:"started"`
-		LastModified time.Time               `json:"last_modified" cli:"last_modified"`
-		RefName      string                  `json:"ref_name" cli:"ref_name"`
-		Commit       string                  `json:"commit" cli:"commit"`
+	return cli.AsListResult(cliRunsFromV2(runs)), nil
+}
+
+var workflowRunGetCmd = cli.Command{
+	Name:    "get",
+	Aliases: []string{"show"},
+	Short:   "Retrieve a workflow run with its workflow definition and jobs (JSON)",
+	Example: "cdsctl experimental workflow get <proj_key> <workflow_run_id>",
+	Ctx:     []cli.Arg{},
+	Args: []cli.Arg{
+		{Name: "proj_key"},
+		{Name: "workflow_run_id"},
+	},
+}
+
+func workflowRunGetFunc(v cli.Values) error {
+	projKey := v.GetString("proj_key")
+	runID := v.GetString("workflow_run_id")
+	run, err := client.WorkflowV2RunStatus(context.Background(), projKey, runID)
+	if err != nil {
+		return err
 	}
-	runsHistory := make([]CliRun, len(runs))
-	for i, r := range runs {
-		runsHistory[i] = CliRun{
-			ID:           r.ID,
-			ProjectKey:   r.ProjectKey,
-			VCSServer:    r.VCSServer,
-			Repository:   r.Repository,
-			WorkflowName: r.WorkflowName,
-			User:         r.Initiator.Username(),
-			Status:       r.Status,
-			RunNumber:    r.RunNumber,
-			Started:      r.Started,
-			LastModified: r.LastModified,
-			RefName:      r.Contexts.Git.RefName,
-			Commit:       r.Contexts.Git.Sha,
-		}
+	jobs, err := client.WorkflowV2RunJobs(context.Background(), projKey, runID)
+	if err != nil {
+		return err
 	}
-	return cli.AsListResult(runsHistory), nil
+	payload := struct {
+		Run  *sdk.V2WorkflowRun     `json:"run"`
+		Jobs []sdk.V2WorkflowRunJob `json:"jobs"`
+	}{Run: run, Jobs: jobs}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
+	return nil
 }
 
 var workflowRunStatusCmd = cli.Command{

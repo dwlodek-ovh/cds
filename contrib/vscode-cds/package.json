@@ -114,6 +114,22 @@
         "title": "Clear Run Filters",
         "category": "CDS",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "vscode-cds.expandRun",
+        "title": "Expand Run",
+        "category": "CDS"
+      },
+      {
+        "command": "vscode-cds.expandJob",
+        "title": "Expand Job",
+        "category": "CDS"
+      },
+      {
+        "command": "vscode-cds.showStepLogs",
+        "title": "Show Step Logs",
+        "category": "CDS",
+        "icon": "$(output)"
       }
     ],
     "configuration": {
@@ -202,6 +218,18 @@
         },
         {
           "command": "vscode-cds.filterRuns",
+          "when": "false"
+        },
+        {
+          "command": "vscode-cds.expandRun",
+          "when": "false"
+        },
+        {
+          "command": "vscode-cds.expandJob",
+          "when": "false"
+        },
+        {
+          "command": "vscode-cds.showStepLogs",
           "when": "false"
         }
       ]
