@@ -204,8 +204,24 @@ function mapRunJob(raw: Record<string, any>): CdsWorkflowRunJob {
     status: raw["status"] ?? "",
     retry: Number(raw["retry"] ?? 0),
     matrix,
+    gate: jobDef["gate"] || undefined,
     steps,
   };
+}
+
+const ACTIVE_STATUSES = new Set(["", "Blocked", "Building", "Waiting", "Scheduling", "Retrying"]);
+
+export function isTerminatedStatus(status: string): boolean {
+  return !ACTIVE_STATUSES.has(status);
+}
+
+/** A terminated job can be restarted (the run itself must also be terminated). */
+function canRerunJob(job: CdsWorkflowRunJob): boolean {
+  if (!isTerminatedStatus(job.status)) {
+    return false;
+  }
+  // The API refuses to restart a skipped job that is not a gate.
+  return job.status !== "Skipped" || !!job.gate;
 }
 
 function matrixKey(job: CdsWorkflowRunJob): string {
@@ -294,7 +310,7 @@ export class JobItem extends vscode.TreeItem {
     this.description = job.status;
     this.tooltip = `Job ${jobLabel(job)}\nStatus: ${job.status}`;
     this.iconPath = statusIcon(job.status);
-    this.contextValue = "cdsJob";
+    this.contextValue = canRerunJob(job) ? "cdsJobDone" : "cdsJob";
     if (job.steps.length > 0) {
       this.command = {
         command: "vscode-cds.expandJob",
@@ -520,6 +536,12 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
     this.clearRunPages(wf.id!);
     this.runJobPromises.clear();
     this._onDidChangeTreeData.fire(wf);
+  }
+
+  /** Refresh the jobs of a single run (and their statuses). */
+  refreshRunJobs(runItem: RunItem): void {
+    this.runJobPromises.delete(runItem.id!);
+    this._onDidChangeTreeData.fire(runItem);
   }
 
   /** Workflows already loaded in the tree, across every repository. */

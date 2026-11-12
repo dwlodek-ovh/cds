@@ -25,6 +25,7 @@ export interface CdsWorkflowRunJob {
   status: string;
   retry?: number;
   matrix?: Record<string, any>;
+  gate?: string;
   steps: CdsWorkflowRunStep[];
 }
 

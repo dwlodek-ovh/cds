@@ -19,7 +19,7 @@ import { onGitRepositoryChanged, updateGitRepository } from './events/git-reposi
 import { PreviewWorkflowCommand } from './commands/preview-workflow';
 import { isCDSActionFile, isCDSWorkerModelFile, isCDSWorkflowFile } from './cds/file_utils';
 import { ClearCacheCommand } from './commands/clear-cache';
-import { WorkflowViewProvider, WorkflowItem, RunItem, JobItem, StepItem, RepoItem, RunFilter } from './workflowViewProvider';
+import { WorkflowViewProvider, WorkflowItem, RunItem, JobItem, StepItem, RepoItem, RunFilter, isTerminatedStatus } from './workflowViewProvider';
 import { CDSRunLogs } from './run-logs';
 import { onProjectChanged } from './events/project';
 
@@ -267,6 +267,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.expandRun', async (item?: RunItem) => {
         if (item) {
+            workflowViewProvider.refreshRunJobs(item);
             await workflowTreeView.reveal(item, { expand: true, select: true });
         }
     }));
@@ -299,11 +300,7 @@ export async function activate(context: vscode.ExtensionContext) {
             );
             runLogs.show(title, log);
         } catch (e) {
-            const err = e as { message?: string; stdout?: string; stderr?: string };
-            const message = [err.message, err.stdout, err.stderr]
-                .filter(Boolean)
-                .join("\n")
-                .trim();
+            const message = commandErrorMessage(e);
             if (message.includes("no log available") || message.includes("no log link")) {
                 runLogs.show(title, "");
             } else {
@@ -311,6 +308,39 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         }
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.rerunJob', async (item?: JobItem) => {
+        const repo = item?.run.workflow.repo.cdsRepo;
+        if (!item || !repo) {
+            vscode.window.showErrorMessage('No CDS job selected.');
+            return;
+        }
+        if (!isTerminatedStatus(item.run.run.status)) {
+            vscode.window.showInformationMessage('The workflow run must be finished before rerunning a job.');
+            return;
+        }
+        try {
+            await vscode.window.withProgress(
+                {
+                    location: vscode.ProgressLocation.Notification,
+                    title: `Restarting job ${item.job.jobId}...`,
+                },
+                () => CDS.rerunWorkflowJob(repo.projectKey, item.run.run.id, item.job.id),
+            );
+            workflowViewProvider.refreshRuns(item.run.workflow);
+            vscode.window.showInformationMessage(`Job ${item.job.jobId} restarted.`);
+        } catch (e) {
+            vscode.window.showErrorMessage(`Failed to restart job: ${commandErrorMessage(e)}`);
+        }
+    }));
+}
+
+function commandErrorMessage(e: unknown): string {
+    const err = e as { message?: string; stdout?: string; stderr?: string };
+    return [err.message, err.stdout, err.stderr]
+        .filter(Boolean)
+        .join("\n")
+        .trim();
 }
 
 interface RunFilterField extends vscode.QuickPickItem {

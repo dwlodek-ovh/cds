@@ -299,6 +299,18 @@ export class CDS {
         );
     }
 
+    /** Restart a single job of a terminated workflow run. */
+    static async rerunWorkflowJob(
+        projectKey: string,
+        runId: string,
+        jobId: string,
+    ): Promise<void> {
+        await CDS.getInstance().runCtl(
+            "experimental", "workflow", "jobs", "run",
+            projectKey, runId, jobId,
+        );
+    }
+
     /**
      * Search v2 workflow runs in a project with optional filters.
      */

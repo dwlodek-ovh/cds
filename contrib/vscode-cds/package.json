@@ -130,6 +130,12 @@
         "title": "Show Step Logs",
         "category": "CDS",
         "icon": "$(output)"
+      },
+      {
+        "command": "vscode-cds.rerunJob",
+        "title": "Rerun Job",
+        "category": "CDS",
+        "icon": "$(debug-restart)"
       }
     ],
     "configuration": {
@@ -209,6 +215,16 @@
           "command": "vscode-cds.filterRuns",
           "when": "view == vscode-cds-workflows && viewItem =~ /^cdsWorkflow/",
           "group": "inline@5"
+        },
+        {
+          "command": "vscode-cds.rerunJob",
+          "when": "view == vscode-cds-workflows && viewItem == cdsJobDone",
+          "group": "inline@1"
+        },
+        {
+          "command": "vscode-cds.rerunJob",
+          "when": "view == vscode-cds-workflows && viewItem == cdsJobDone",
+          "group": "1_rerun@1"
         }
       ],
       "commandPalette": [
@@ -230,6 +246,10 @@
         },
         {
           "command": "vscode-cds.showStepLogs",
+          "when": "false"
+        },
+        {
+          "command": "vscode-cds.rerunJob",
           "when": "false"
         }
       ]
