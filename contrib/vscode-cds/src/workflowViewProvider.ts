@@ -2,7 +2,13 @@ import * as vscode from "vscode";
 import * as fsp from "fs/promises";
 import * as path from "path";
 import { CDS } from "./cds";
-import { CdsRepository, CdsWorkflowRun, CdsWorkflowRunJob, CdsWorkflowRunStep } from "./cds/models";
+import {
+  CdsRepository,
+  CdsWorkflowRun,
+  CdsWorkflowRunJob,
+  CdsWorkflowRunResult,
+  CdsWorkflowRunStep,
+} from "./cds/models";
 
 /** Number of runs fetched per page. */
 const RUN_PAGE_SIZE = 15;
@@ -209,6 +215,102 @@ function mapRunJob(raw: Record<string, any>): CdsWorkflowRunJob {
   };
 }
 
+const RESULT_ICONS: Record<string, string> = {
+  variable: "symbol-variable",
+  docker: "server",
+  deployment: "rocket",
+  debian: "package",
+  helm: "package",
+  generic: "file",
+  tests: "beaker",
+  coverage: "graph",
+  release: "tag",
+  staticFiles: "files",
+  python: "file-code",
+  npm: "package",
+  maven: "package",
+  gradle: "package",
+};
+
+/** Result types that do not point to a downloadable file. */
+const NON_FILE_RESULT_TYPES = new Set(["variable", "docker", "deployment"]);
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  ".txt", ".log", ".json", ".xml", ".yaml", ".yml", ".md", ".csv",
+  ".html", ".htm", ".ini", ".conf", ".cfg", ".sh", ".bash", ".py",
+  ".go", ".c", ".cc", ".cpp", ".h", ".hpp", ".toml", ".sql", ".diff",
+  ".patch", ".js", ".ts", ".css",
+]);
+
+/** Largest text file that is downloaded for a preview, in bytes. */
+export const RESULT_PREVIEW_MAX_SIZE = 2 * 1024 * 1024;
+
+function resultIcon(type: string): vscode.ThemeIcon {
+  return new vscode.ThemeIcon(RESULT_ICONS[type] ?? "archive");
+}
+
+function resultDisplayName(result: CdsWorkflowRunResult): string {
+  const separator = result.name.indexOf(":");
+  if (separator >= 0 && separator < result.name.length - 1) {
+    return result.name.substring(separator + 1);
+  }
+  return result.label || result.name || result.id;
+}
+
+export function resultFileName(result: CdsWorkflowRunResult): string | undefined {
+  const rawName = result.detail?.["name"]
+    ?? result.artifactManagerMetadata?.["name"]
+    ?? result.artifactManagerMetadata?.["path"];
+  if (!rawName) {
+    return undefined;
+  }
+  return String(rawName).split("/").pop() || undefined;
+}
+
+function resultSize(result: CdsWorkflowRunResult): number | undefined {
+  const size = Number(result.detail?.["size"]);
+  return Number.isFinite(size) && size >= 0 ? size : undefined;
+}
+
+export function isFileResult(result: CdsWorkflowRunResult): boolean {
+  return !NON_FILE_RESULT_TYPES.has(result.type);
+}
+
+export function isTextResult(result: CdsWorkflowRunResult): boolean {
+  const fileName = resultFileName(result);
+  if (!fileName) {
+    return false;
+  }
+  const dot = fileName.lastIndexOf(".");
+  return dot >= 0 && TEXT_FILE_EXTENSIONS.has(fileName.substring(dot).toLowerCase());
+}
+
+export function canPreviewResultContent(result: CdsWorkflowRunResult): boolean {
+  const size = resultSize(result);
+  return isTextResult(result) && (size === undefined || size <= RESULT_PREVIEW_MAX_SIZE);
+}
+
+function mapRunResult(raw: Record<string, any>): CdsWorkflowRunResult {
+  const type = String(raw["type"] ?? "");
+  const detail = raw["detail"] ?? {};
+  const data = detail["data"] && typeof detail["data"] === "object" ? detail["data"] : {};
+  const metadata = raw["metadata"] && typeof raw["metadata"] === "object"
+    ? raw["metadata"]
+    : undefined;
+  return {
+    id: raw["id"] ?? "",
+    type,
+    name: raw["identifier"] || `${type}:${data["name"] ?? raw["id"] ?? ""}`,
+    label: raw["label"] || undefined,
+    status: raw["status"] || undefined,
+    detailType: detail["type"] || undefined,
+    detail: data,
+    metadata,
+    artifactManagerMetadata: raw["artifact_manager_metadata"] ?? undefined,
+    artifactManagerIntegrationName: raw["artifact_manager_integration_name"] ?? undefined,
+  };
+}
+
 const ACTIVE_STATUSES = new Set(["", "Blocked", "Building", "Waiting", "Scheduling", "Retrying"]);
 
 export function isTerminatedStatus(status: string): boolean {
@@ -342,11 +444,80 @@ export class StepItem extends vscode.TreeItem {
   }
 }
 
+/** Group item listing the jobs of a run. */
+export class JobsGroupItem extends vscode.TreeItem {
+  readonly kind = "jobsGroup" as const;
+  constructor(
+    public readonly jobs: CdsWorkflowRunJob[],
+    public readonly run: RunItem,
+  ) {
+    super("Jobs", vscode.TreeItemCollapsibleState.Collapsed);
+    this.id = `jobs:${run.id}`;
+    this.description = jobs.length > 0 ? `${jobs.length}` : "none";
+    this.tooltip = "Jobs of this workflow run";
+    this.iconPath = new vscode.ThemeIcon("checklist");
+    this.contextValue = "cdsJobsGroup";
+  }
+}
+
+/** Group item listing the results produced by a run. */
+export class ResultsGroupItem extends vscode.TreeItem {
+  readonly kind = "resultsGroup" as const;
+  constructor(
+    public readonly results: CdsWorkflowRunResult[],
+    public readonly run: RunItem,
+  ) {
+    super("Results", vscode.TreeItemCollapsibleState.Collapsed);
+    this.id = `results:${run.id}`;
+    this.description = results.length > 0 ? `${results.length}` : "none";
+    this.tooltip = "Results produced by this workflow run";
+    this.iconPath = new vscode.ThemeIcon("archive");
+    this.contextValue = "cdsResultsGroup";
+  }
+}
+
+/** A result produced by a workflow run. Clicking it previews or downloads it. */
+export class ResultItem extends vscode.TreeItem {
+  readonly kind = "result" as const;
+  constructor(
+    public readonly result: CdsWorkflowRunResult,
+    public readonly run: RunItem,
+  ) {
+    super(resultDisplayName(result), vscode.TreeItemCollapsibleState.None);
+    this.id = `result:${run.id}:${result.id}`;
+    this.description = result.type;
+    const tooltip = [
+      result.name,
+      `Type: ${result.type}`,
+      result.status ? `Status: ${result.status}` : "",
+      result.label ? result.label : "",
+      isFileResult(result) ? "Click to download" : "Click to preview",
+    ].filter(Boolean);
+    this.tooltip = tooltip.join("\n");
+    this.iconPath = resultIcon(result.type);
+    this.contextValue = isFileResult(result) ? "cdsResultFile" : "cdsResult";
+    this.command = {
+      command: "vscode-cds.openResult",
+      title: isFileResult(result) ? "Download result" : "Preview result",
+      arguments: [this],
+    };
+  }
+}
+
 /** Placeholder shown when a run has no job. */
 export class NoJobsItem extends vscode.TreeItem {
   readonly kind = "noJobs" as const;
   constructor() {
     super("No jobs found", vscode.TreeItemCollapsibleState.None);
+    this.iconPath = new vscode.ThemeIcon("info");
+  }
+}
+
+/** Placeholder shown when a run has no result. */
+export class NoResultsItem extends vscode.TreeItem {
+  readonly kind = "noResults" as const;
+  constructor() {
+    super("No results found", vscode.TreeItemCollapsibleState.None);
     this.iconPath = new vscode.ThemeIcon("info");
   }
 }
@@ -406,9 +577,13 @@ type TreeNode =
   | RepoItem
   | WorkflowItem
   | RunItem
+  | JobsGroupItem
+  | ResultsGroupItem
   | JobItem
   | StepItem
+  | ResultItem
   | NoJobsItem
+  | NoResultsItem
   | LoadMoreItem
   | FilterSummaryItem
   | NoRunsItem
@@ -455,8 +630,8 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
   private runPagePromises = new Map<string, Promise<RunPage>>();
   private runFilters = new Map<string, RunFilter>();
 
-  // Jobs of a run, keyed by run tree id
-  private runJobPromises = new Map<string, Promise<TreeNode[]>>();
+  // Jobs and results of a run, keyed by run tree id
+  private runChildrenPromises = new Map<string, Promise<TreeNode[]>>();
 
   // Workflow names discovered per CDS repo (projectKey:repoId -> Set<workflowName>)
   private discoveredWorkflows = new Map<string, Promise<string[]>>();
@@ -512,7 +687,19 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
       return this.renderRunNodes(element);
     }
     if (element instanceof RunItem) {
-      return this.getRunJobs(element);
+      return this.getRunChildren(element);
+    }
+    if (element instanceof JobsGroupItem) {
+      if (element.jobs.length === 0) {
+        return [new NoJobsItem()];
+      }
+      return element.jobs.map((job) => new JobItem(job, element.run));
+    }
+    if (element instanceof ResultsGroupItem) {
+      if (element.results.length === 0) {
+        return [new NoResultsItem()];
+      }
+      return element.results.map((result) => new ResultItem(result, element.run));
     }
     if (element instanceof JobItem) {
       return element.job.steps.map((step) => new StepItem(step, element));
@@ -526,7 +713,7 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
     this.workflowItems.clear();
     this.runPages.clear();
     this.runPagePromises.clear();
-    this.runJobPromises.clear();
+    this.runChildrenPromises.clear();
     this.discoveredWorkflows.clear();
     this._onDidChangeTreeData.fire();
   }
@@ -534,13 +721,13 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
   /** Refresh only a single workflow's run list (after stop / restart). */
   refreshRuns(wf: WorkflowItem): void {
     this.clearRunPages(wf.id!);
-    this.runJobPromises.clear();
+    this.runChildrenPromises.clear();
     this._onDidChangeTreeData.fire(wf);
   }
 
-  /** Refresh the jobs of a single run (and their statuses). */
+  /** Refresh the jobs and results of a single run (and their statuses). */
   refreshRunJobs(runItem: RunItem): void {
-    this.runJobPromises.delete(runItem.id!);
+    this.runChildrenPromises.delete(runItem.id!);
     this._onDidChangeTreeData.fire(runItem);
   }
 
@@ -707,33 +894,34 @@ export class WorkflowViewProvider implements vscode.TreeDataProvider<TreeNode>, 
     }
   }
 
-  private getRunJobs(runItem: RunItem): Promise<TreeNode[]> {
+  private getRunChildren(runItem: RunItem): Promise<TreeNode[]> {
     const key = runItem.id!;
-    let promise = this.runJobPromises.get(key);
+    let promise = this.runChildrenPromises.get(key);
     if (!promise) {
-      promise = this.buildRunJobs(runItem).catch((err) => {
-        this.runJobPromises.delete(key);
+      promise = this.buildRunChildren(runItem).catch((err) => {
+        this.runChildrenPromises.delete(key);
         throw err;
       });
-      this.runJobPromises.set(key, promise);
+      this.runChildrenPromises.set(key, promise);
     }
     return promise;
   }
 
-  private async buildRunJobs(runItem: RunItem): Promise<TreeNode[]> {
+  private async buildRunChildren(runItem: RunItem): Promise<TreeNode[]> {
     const repo = runItem.workflow.repo.cdsRepo;
     if (!repo) {
       return [];
     }
     const payload = await CDS.getWorkflowRun(repo.projectKey, runItem.run.id);
     if (!payload) {
-      return [new NoJobsItem()];
+      return [new ResultsGroupItem([], runItem), new JobsGroupItem([], runItem)];
     }
     const jobs = dedupeRunJobs((payload.jobs ?? []).map((raw) => mapRunJob(raw)));
-    if (jobs.length === 0) {
-      return [new NoJobsItem()];
-    }
-    return jobs.map((job) => new JobItem(job, runItem));
+    const results = (payload.results ?? []).map((raw) => mapRunResult(raw));
+    return [
+      new ResultsGroupItem(results, runItem),
+      new JobsGroupItem(jobs, runItem),
+    ];
   }
 
   private async ensureRunPage(wf: WorkflowItem): Promise<void> {

@@ -29,6 +29,26 @@ export interface CdsWorkflowRunJob {
   steps: CdsWorkflowRunStep[];
 }
 
+export interface CdsWorkflowRunResultMetadata {
+  type: string;
+  value: string;
+}
+
+export interface CdsWorkflowRunResult {
+  id: string;
+  /** Result type, e.g. variable, generic, debian, tests. */
+  type: string;
+  /** "type:name", as returned by cdsctl. */
+  name: string;
+  label?: string;
+  status?: string;
+  detailType?: string;
+  detail: Record<string, any>;
+  metadata?: Record<string, CdsWorkflowRunResultMetadata>;
+  artifactManagerMetadata?: Record<string, string>;
+  artifactManagerIntegrationName?: string;
+}
+
 export interface CDSWorkflow {
     name: string;
 }

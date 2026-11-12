@@ -272,17 +272,74 @@ export class CDS {
     static async getWorkflowRun(
         projectKey: string,
         runId: string,
-    ): Promise<{ run: Record<string, any>; jobs: Record<string, any>[] } | undefined> {
-        const out = await CDS.getInstance().runCtl(
+    ): Promise<{
+        run: Record<string, any>;
+        jobs: Record<string, any>[];
+        results?: Record<string, any>[];
+    } | undefined> {
+        const out = await CDS.getInstance().runCtlWithTimeout(
+            60_000,
             "experimental", "workflow", "get",
             projectKey, runId,
         );
+        let payload: {
+            run: Record<string, any>;
+            jobs: Record<string, any>[];
+            results?: Record<string, any>[];
+        };
         try {
-            return JSON.parse(out);
+            payload = JSON.parse(out);
         } catch {
             Journal.logError(new Error(`getWorkflowRun: failed to parse JSON output`));
             return undefined;
         }
+        // cdsctl versions that predate the results in `workflow get` still
+        // expose the light result list.
+        if (!Array.isArray(payload.results)) {
+            payload.results = await CDS.getWorkflowRunResults(projectKey, runId);
+        }
+        return payload;
+    }
+
+    /** Fetch the light result list of a workflow run. */
+    private static async getWorkflowRunResults(
+        projectKey: string,
+        runId: string,
+    ): Promise<Record<string, any>[]> {
+        try {
+            const out = await CDS.getInstance().runCtl(
+                "experimental", "workflow", "results", "list",
+                projectKey, runId, "--format", "json",
+            );
+            const items: Record<string, any>[] = JSON.parse(out);
+            return items.map((r) => {
+                const name = String(r["name"] ?? "");
+                return {
+                    id: r["id"] ?? "",
+                    type: r["type"] ?? "",
+                    identifier: name,
+                    detail: {
+                        data: { name: name.substring(name.indexOf(":") + 1) },
+                    },
+                };
+            });
+        } catch {
+            return [];
+        }
+    }
+
+    /** Download a single run result to the given destination file. */
+    static async downloadWorkflowRunResult(
+        projectKey: string,
+        runId: string,
+        resultId: string,
+        destination: string,
+    ): Promise<string> {
+        return CDS.getInstance().runCtlWithTimeout(
+            600_000,
+            "experimental", "workflow", "results", "download-one",
+            projectKey, runId, resultId, destination,
+        );
     }
 
     /** Fetch the log of a single step of a workflow run job. */

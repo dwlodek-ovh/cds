@@ -17,14 +17,11 @@ export function setGitRepository(path: string | null) {
 }
 
 export async function updateGitRepository() {
-    // ignore when we're going to an output panel
-    if (vscode.window.activeTextEditor?.document.uri.scheme === 'output') {
+    const editor = vscode.window.activeTextEditor;
+    // Keep the current repository when a non-file editor (webview, output,
+    // settings, ...) becomes active: opening a preview must not reset the tree.
+    if (!editor || editor.document.uri.scheme !== 'file') {
         return;
     }
-
-    if (!vscode.window.activeTextEditor || vscode.window.activeTextEditor.document.uri.scheme !== 'file') {
-        setGitRepository(null);
-    } else {
-        setGitRepository(await getGitRepositoryPath(vscode.window.activeTextEditor.document.uri.path))
-    }
+    setGitRepository(await getGitRepositoryPath(editor.document.uri.path));
 }

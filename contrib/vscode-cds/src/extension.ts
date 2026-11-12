@@ -19,8 +19,23 @@ import { onGitRepositoryChanged, updateGitRepository } from './events/git-reposi
 import { PreviewWorkflowCommand } from './commands/preview-workflow';
 import { isCDSActionFile, isCDSWorkerModelFile, isCDSWorkflowFile } from './cds/file_utils';
 import { ClearCacheCommand } from './commands/clear-cache';
-import { WorkflowViewProvider, WorkflowItem, RunItem, JobItem, StepItem, RepoItem, RunFilter, isTerminatedStatus } from './workflowViewProvider';
+import {
+    WorkflowViewProvider,
+    WorkflowItem,
+    RunItem,
+    JobItem,
+    StepItem,
+    ResultItem,
+    RepoItem,
+    RunFilter,
+    canPreviewResultContent,
+    isFileResult,
+    isTerminatedStatus,
+    resultFileName,
+    RESULT_PREVIEW_MAX_SIZE,
+} from './workflowViewProvider';
 import { CDSRunLogs } from './run-logs';
+import { CDSResultPreview } from './result-preview';
 import { onProjectChanged } from './events/project';
 
 const CDS_SCHEMA = 'cds';
@@ -107,9 +122,11 @@ export async function activate(context: vscode.ExtensionContext) {
     // ── Workflow Explorer ────────────────────────────────────────────────────
     const workflowViewProvider = new WorkflowViewProvider();
     const runLogs = new CDSRunLogs();
+    const resultPreview = new CDSResultPreview();
 
     context.subscriptions.push(workflowViewProvider);
     context.subscriptions.push(runLogs);
+    context.subscriptions.push(resultPreview);
     const workflowTreeView = vscode.window.createTreeView('vscode-cds-workflows', {
         treeDataProvider: workflowViewProvider,
         showCollapseAll: true,
@@ -333,6 +350,121 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage(`Failed to restart job: ${commandErrorMessage(e)}`);
         }
     }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.openResult', async (item?: ResultItem) => {
+        if (!(item instanceof ResultItem)) {
+            vscode.window.showErrorMessage('No CDS result selected.');
+            return;
+        }
+        if (isFileResult(item.result)) {
+            await downloadResult(item, resultPreview);
+        } else {
+            resultPreview.show(item.result, item.run.run);
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.previewResult', async (item?: ResultItem) => {
+        if (!(item instanceof ResultItem)) {
+            vscode.window.showErrorMessage('No CDS result selected.');
+            return;
+        }
+        await previewResult(item, resultPreview);
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand('vscode-cds.downloadResult', async (item?: ResultItem) => {
+        if (!(item instanceof ResultItem)) {
+            vscode.window.showErrorMessage('No CDS result selected.');
+            return;
+        }
+        await downloadResult(item, resultPreview);
+    }));
+}
+
+function firstLine(value: string): string {
+    return value.split("\n").map((line) => line.trim()).find(Boolean) ?? value;
+}
+
+async function downloadResult(
+    item: ResultItem,
+    resultPreview: CDSResultPreview,
+): Promise<void> {
+    const repo = item.run.workflow.repo.cdsRepo;
+    if (!repo) {
+        vscode.window.showErrorMessage('No CDS repository data associated with this result.');
+        return;
+    }
+    const fileName = resultFileName(item.result) ?? item.result.id;
+    const baseDir = item.run.workflow.repo.repoRoot ?? os.homedir();
+    const target = await vscode.window.showSaveDialog({
+        title: `Download ${item.result.name}`,
+        defaultUri: vscode.Uri.file(path.join(baseDir, fileName)),
+        saveLabel: 'Download',
+    });
+    if (!target) {
+        return;
+    }
+    try {
+        await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: `Downloading ${fileName}...`,
+            },
+            () => CDS.downloadWorkflowRunResult(
+                repo.projectKey,
+                item.run.run.id,
+                item.result.id,
+                target.fsPath,
+            ),
+        );
+        vscode.window.showInformationMessage(`Result downloaded to ${target.fsPath}.`);
+    } catch (e) {
+        const message = commandErrorMessage(e);
+        const action = await vscode.window.showErrorMessage(
+            `Failed to download ${fileName}: ${firstLine(message)}`,
+            'Show Details',
+        );
+        if (action === 'Show Details') {
+            resultPreview.show(item.result, item.run.run, { error: message });
+        }
+    }
+}
+
+async function previewResult(
+    item: ResultItem,
+    resultPreview: CDSResultPreview,
+): Promise<void> {
+    const repo = item.run.workflow.repo.cdsRepo;
+    if (!repo || !canPreviewResultContent(item.result)) {
+        resultPreview.show(item.result, item.run.run);
+        return;
+    }
+    const fileName = resultFileName(item.result) ?? 'result.txt';
+    try {
+        const content = await vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: `Loading ${item.result.name}...`,
+            },
+            async () => {
+                const dir = path.join(os.tmpdir(), 'cds-results', item.run.run.id, item.result.id);
+                await fs.promises.mkdir(dir, { recursive: true });
+                const destination = path.join(dir, fileName);
+                await CDS.downloadWorkflowRunResult(
+                    repo.projectKey,
+                    item.run.run.id,
+                    item.result.id,
+                    destination,
+                );
+                const raw = await fs.promises.readFile(destination, 'utf-8');
+                return raw.length > RESULT_PREVIEW_MAX_SIZE
+                    ? `${raw.substring(0, RESULT_PREVIEW_MAX_SIZE)}\n\n[truncated]`
+                    : raw;
+            },
+        );
+        resultPreview.show(item.result, item.run.run, { content });
+    } catch (e) {
+        resultPreview.show(item.result, item.run.run, { error: commandErrorMessage(e) });
+    }
 }
 
 function commandErrorMessage(e: unknown): string {

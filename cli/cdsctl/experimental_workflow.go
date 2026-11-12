@@ -347,10 +347,15 @@ func workflowRunGetFunc(v cli.Values) error {
 	if err != nil {
 		return err
 	}
+	results, err := client.WorkflowV2RunResultList(context.Background(), projKey, runID)
+	if err != nil {
+		return err
+	}
 	payload := struct {
-		Run  *sdk.V2WorkflowRun     `json:"run"`
-		Jobs []sdk.V2WorkflowRunJob `json:"jobs"`
-	}{Run: run, Jobs: jobs}
+		Run     *sdk.V2WorkflowRun        `json:"run"`
+		Jobs    []sdk.V2WorkflowRunJob    `json:"jobs"`
+		Results []sdk.V2WorkflowRunResult `json:"results"`
+	}{Run: run, Jobs: jobs, Results: results}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
